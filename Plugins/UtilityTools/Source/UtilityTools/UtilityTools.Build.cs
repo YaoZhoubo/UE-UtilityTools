@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 using UnrealBuildTool;
 
@@ -7,12 +7,9 @@ public class UtilityTools : ModuleRules
 	public UtilityTools(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-		
+
 		PublicIncludePaths.AddRange(
-			new string[] {
-				// ... add public include paths required here ...
-			}
-			);
+			new string[] { });
 				
 		
 		PrivateIncludePaths.AddRange(
@@ -26,6 +23,8 @@ public class UtilityTools : ModuleRules
 			new string[]
 			{
 				"Core",
+                "Projects",
+                "AssetRegistry"
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);
