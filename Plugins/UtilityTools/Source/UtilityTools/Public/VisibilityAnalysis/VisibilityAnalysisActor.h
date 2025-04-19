@@ -9,7 +9,7 @@
 DECLARE_LOG_CATEGORY_CLASS(AVisibilityAnalysisActorLog, Log, All);
 
 UCLASS(HideCategories = (Tick, Replication, Rendering, Collision, Actor,
-	Input, HLOD, Physics, WorldPartition, Cooking, DataLayers, Networking))
+	Input, HLOD, Physics, WorldPartition, Cooking, DataLayers, Networking, LevelInstance))
 class UTILITYTOOLS_API AVisibilityAnalysisActor : public AActor
 {
 	GENERATED_BODY()
@@ -37,6 +37,8 @@ public:
 	float AspectRatio;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = 128, ClampMax = 2048))
 	int32 DepthCaptureResolution;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = 0, ClampMax = 1))
+	float Opacity;
 
 	// debug frustum
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Frustum, meta = (AllowPrivateAccess = "true"))

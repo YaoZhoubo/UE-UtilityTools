@@ -27,6 +27,7 @@ AVisibilityAnalysisActor::AVisibilityAnalysisActor()
 	, DepthError(2.f)
 	, AspectRatio(1.77f)
 	, DepthCaptureResolution(512)
+	, Opacity(0.1f)
 	, bOpenDebugFrustum(true)
 	, bOpenDebugInEdit(true)
 	, FrustumNear(100.f)
@@ -132,6 +133,7 @@ void AVisibilityAnalysisActor::UpdateParams(float DeltaTime)
 				VisibilityMID->SetScalarParameterValue(FName("FOV"), FOV);
 				VisibilityMID->SetScalarParameterValue(FName("Aspect Ratio"), AspectRatio);
 				VisibilityMID->SetScalarParameterValue(FName("Distance"), Distance);
+				VisibilityMID->SetScalarParameterValue(FName("Opacity"), Opacity);
 			}
 		}
 	}
@@ -237,6 +239,12 @@ void AVisibilityAnalysisActor::CreateMaterial()
 	);
 	FOVParam->SetEditableName("FOV");
 	VisibilityMaterial->AddExpressionParameter(FOVParam, VisibilityMaterial->EditorParameters);
+	// OpacityParam
+	UMaterialExpressionScalarParameter* OpacityParam = Cast<UMaterialExpressionScalarParameter>(
+		CreateMaterialExpression(VisibilityMaterial, UMaterialExpressionScalarParameter::StaticClass())
+	);
+	OpacityParam->SetEditableName("Opacity");
+	VisibilityMaterial->AddExpressionParameter(OpacityParam, VisibilityMaterial->EditorParameters);
 	// AspectRatioParam
 	UMaterialExpressionScalarParameter* AspectRatioParam = Cast<UMaterialExpressionScalarParameter>(
 		CreateMaterialExpression(VisibilityMaterial, UMaterialExpressionScalarParameter::StaticClass())
@@ -257,7 +265,7 @@ void AVisibilityAnalysisActor::CreateMaterial()
 	UMaterialExpressionCustom* Custom1 = Cast<UMaterialExpressionCustom>(
 		CreateMaterialExpression(VisibilityMaterial, UMaterialExpressionCustom::StaticClass())
 	);
-	Custom1->Inputs.SetNum(10);
+	Custom1->Inputs.SetNum(11);
 	Custom1->Inputs[0] = FCustomInput{ "WorldPosition" };
 	Custom1->Inputs[1] = FCustomInput{ "CameraPosition" };
 	Custom1->Inputs[2] = FCustomInput{ "Xdirection" };
@@ -268,6 +276,7 @@ void AVisibilityAnalysisActor::CreateMaterial()
 	Custom1->Inputs[7] = FCustomInput{ "DepthError" };
 	Custom1->Inputs[8] = FCustomInput{ "DepthTexture" };
 	Custom1->Inputs[9] = FCustomInput{ "Distance" };
+	Custom1->Inputs[10] = FCustomInput{ "Opacity" };
 	Custom1->OutputType = ECustomMaterialOutputType::CMOT_Float3;
 	// connect custom
 	WorldPosition->ConnectExpression(Custom1->GetInput(0), 0);
@@ -280,9 +289,10 @@ void AVisibilityAnalysisActor::CreateMaterial()
 	DepthErrorParam->ConnectExpression(Custom1->GetInput(7), 0);
 	DepthTextureSampleParam->ConnectExpression(Custom1->GetInput(8), 0);
 	DistanceParam->ConnectExpression(Custom1->GetInput(9), 0);
+	OpacityParam->ConnectExpression(Custom1->GetInput(10), 0);
 	// Code
 	Custom1->Code = R"(
-// Input: WorldPosition, CameraDirectiton, Xdirection, Ydirection, Zdirection, AspectRatio, FOV, DepthError, DepthTexture, Distance
+// Input: WorldPosition, CameraDirectiton, Xdirection, Ydirection, Zdirection, AspectRatio, FOV, DepthError, DepthTexture, Distance, Opacity
 float3 position = WorldPosition - CameraPosition;
 float3 direction = normalize(position);
 float cullingExp = 0.f;
@@ -309,7 +319,7 @@ float depthValue = DepthTexture.Sample(DepthTextureSampler, ScreenUV).r;
 if(distanceFromXY > depthValue) resultColor = float3(1, 0, 0);
 else resultColor = float3(0, 1, 0);
 resultColor *= cullingExp;
-resultColor *= 0.2;
+resultColor *= Opacity * 0.1;
 return resultColor;
 )";
 	VisibilityMaterial->GetEditorOnlyData()->EmissiveColor.Expression = Custom1;
