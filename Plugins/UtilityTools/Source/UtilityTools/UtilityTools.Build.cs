@@ -8,24 +8,24 @@ public class UtilityTools : ModuleRules
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicIncludePaths.AddRange(
-			new string[] { });
-				
-		
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				// ... add other private include paths required here ...
-			}
-			);
-			
-		
-		PublicDependencyModuleNames.AddRange(
+        PrivateIncludePaths.AddRange(new string[]
+            {
+                
+            });
+
+        PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
 				"Core",
-                "Projects",
-                "AssetRegistry"
-				// ... add other public dependencies that you statically link with here ...
+                "Engine",
+                "AssetRegistry",
+                "Renderer",
+				"RenderCore",
+				"RHI",
+				"Projects",
+				"GameplayTags",
+				"CommonUI",
+				"UMG"
 			}
 			);
 			
@@ -34,7 +34,6 @@ public class UtilityTools : ModuleRules
 			new string[]
 			{
 				"CoreUObject",
-				"Engine",
 				"Slate",
 				"SlateCore",
 				// ... add private dependencies that you statically link with here ...	
