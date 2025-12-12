@@ -6,45 +6,25 @@ public class UtilityTools : ModuleRules
 {
 	public UtilityTools(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-
-        PrivateIncludePaths.AddRange(new string[]
-            {
-                
-            });
-
-        PublicDependencyModuleNames.AddRange(
+		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;	
+		
+		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
 				"Core",
-                "Engine",
-                "AssetRegistry",
-                "Renderer",
+				"Engine",
+				"AssetRegistry",
+				"Renderer",
 				"RenderCore",
 				"RHI",
 				"Projects",
 				"GameplayTags",
 				"CommonUI",
-				"UMG"
-			}
-			);
-			
-		
-		PrivateDependencyModuleNames.AddRange(
-			new string[]
-			{
+				"UMG",
 				"CoreUObject",
 				"Slate",
 				"SlateCore",
-				// ... add private dependencies that you statically link with here ...	
-			}
-			);
-		
-		
-		DynamicallyLoadedModuleNames.AddRange(
-			new string[]
-			{
-				// ... add any modules that your module loads dynamically here ...
+				"CustomRenderer"
 			}
 			);
 	}
