@@ -1,0 +1,362 @@
+#include "/Engine/Public/Platform.ush"
+
+
+// BVH查询相关常量和结构
+static const float MAX_DISTANCE = 1e10;
+static const uint MAX_STACK_SIZE = 512;
+static const int INVALID_NODE_INDEX = -1;
+
+// BVH节点数据结构（与C++端对应）
+struct FGPUBVHNode
+{
+    float3 MinExtent;
+    float3 MaxExtent;
+    int LeftChild;
+    int RightChild;
+    int SegmentStart;
+    int SegmentCount;
+    bool IsLeaf;
+};
+
+// 线段数据结构（与C++端对应）
+struct FGPUSegment
+{
+    float3 Start;
+    float3 End;
+    uint PolygonIndex;
+};
+
+// 计算点到线段的距离
+float PointToSegmentDistance(float3 inPoint, float3 segmentStart, float3 segmentEnd)
+{
+    float3 segmentDir = segmentEnd - segmentStart;
+    float3 pointToStart = inPoint - segmentStart;
+    
+    float segmentLengthSq = dot(segmentDir, segmentDir);
+    if (segmentLengthSq < 1e-8) // 线段长度接近0，退化为点到点的距离
+    {
+        return length(pointToStart);
+    }
+    
+    // 计算投影参数t
+    float t = dot(pointToStart, segmentDir) / segmentLengthSq;
+    t = clamp(t, 0.0, 1.0);
+    
+    // 计算投影点
+    float3 projection = segmentStart + t * segmentDir;
+    
+    return length(inPoint - projection);
+}
+
+// 2D 线段距离计算
+float PointToSegmentDistance2D(float2 inPoint, float2 segmentStart, float2 segmentEnd, out float outT)
+{
+    float2 segmentVec = segmentEnd - segmentStart;
+    float2 pointVec = inPoint - segmentStart;
+    
+    float segmentLengthSq = dot(segmentVec, segmentVec);
+    
+    if (segmentLengthSq < 1e-8)
+    {
+        float2 delta = inPoint - segmentStart;
+        return sqrt(dot(delta, delta));
+    }
+    
+    float t = dot(pointVec, segmentVec) / segmentLengthSq;
+    t = clamp(t, 0.0, 1.0);
+    
+    outT = t;
+    
+    float2 projection = segmentStart + t * segmentVec;
+    float2 delta = inPoint - projection;
+    
+    return sqrt(dot(delta, delta));
+}
+
+// 计算点到AABB包围盒的距离
+float PointToAABBDistance(float3 inPoint, float3 minExtent, float3 maxExtent)
+{
+    float3 closestPoint = clamp(inPoint, minExtent, maxExtent);
+    return length(inPoint - closestPoint);
+}
+
+// 2D AABB距离计算
+float PointToAABBDistance2D(float2 inPoint, float2 minExtent, float2 maxExtent)
+{
+    float2 closestPoint = clamp(inPoint, minExtent, maxExtent);
+    float2 delta = inPoint - closestPoint;
+    
+    return sqrt(dot(delta, delta));
+}
+
+// 检查节点是否有效
+bool IsValidNode(FGPUBVHNode node)
+{
+    // 有效节点条件：有子节点或者是叶子节点且有线段
+    return (node.LeftChild != INVALID_NODE_INDEX ||
+            node.RightChild != INVALID_NODE_INDEX ||
+            (node.LeftChild == INVALID_NODE_INDEX &&
+             node.RightChild == INVALID_NODE_INDEX &&
+             node.SegmentCount > 0));
+}
+
+// 从纹理中读取BVH节点
+FGPUBVHNode ReadBVHNode(uint nodeIndex, Texture2D<float4> BVHDataTexture)
+{
+    FGPUBVHNode node;
+    
+    uint2 textureSize;
+    BVHDataTexture.GetDimensions(textureSize.x, textureSize.y);
+
+    // 检查节点索引是否有效
+    if (nodeIndex == INVALID_NODE_INDEX)
+    {
+        // 返回无效节点
+        node.LeftChild = INVALID_NODE_INDEX;
+        node.RightChild = INVALID_NODE_INDEX;
+        node.IsLeaf = false;
+        return node;
+    }
+
+    // 计算节点在纹理中的位置
+    uint pixelIndex = nodeIndex * 3;
+    uint textureX = pixelIndex % (uint) textureSize.x;
+    uint textureY = pixelIndex / (uint) textureSize.x;
+
+    // 读取第1个像素的数据
+    float4 pixel0 = BVHDataTexture.Load(uint3(textureX, textureY, 0));
+
+    // 第2个像素
+    pixelIndex = nodeIndex * 3 + 1;
+    textureX = pixelIndex % (uint) textureSize.x;
+    textureY = pixelIndex / (uint) textureSize.x;
+    float4 pixel1 = BVHDataTexture.Load(uint3(textureX, textureY, 0));
+
+    // 第3个像素
+    pixelIndex = nodeIndex * 3 + 2;
+    textureX = pixelIndex % (uint) textureSize.x;
+    textureY = pixelIndex / (uint) textureSize.x;
+    float4 pixel2 = BVHDataTexture.Load(uint3(textureX, textureY, 0));
+    
+    // 解析节点数据
+    node.MinExtent = pixel0.rgb;
+    node.MaxExtent = pixel1.rgb;
+    node.LeftChild = (int) pixel0.a;
+    node.RightChild = (int) pixel1.a;
+    node.SegmentStart = (int) pixel2.r;
+    node.SegmentCount = (int) pixel2.g;
+    node.IsLeaf = (bool) pixel2.b;
+    
+    return node;
+}
+
+// 从纹理中读取线段数据
+FGPUSegment ReadSegment(uint segmentIndex, Texture2D<float4> SegmentDataTexture)
+{
+    FGPUSegment segment;
+
+    uint2 textureSize;
+    SegmentDataTexture.GetDimensions(textureSize.x, textureSize.y);
+    
+     // 计算线段在纹理中的位置
+    uint pixelIndex = segmentIndex * 2;
+    uint textureX = pixelIndex % (uint) textureSize.x;
+    uint textureY = pixelIndex / (uint) textureSize.x;
+    
+    // 读取第1个像素的数据
+    float4 pixel0 = SegmentDataTexture.Load(uint3(textureX, textureY, 0));
+
+    // 读取第2个像素的数据
+    pixelIndex = segmentIndex * 2 + 1;
+    textureX = pixelIndex % (uint) textureSize.x;
+    textureY = pixelIndex / (uint) textureSize.x;
+    float4 pixel1 = SegmentDataTexture.Load(uint3(textureX, textureY, 0));
+    
+     // 解析线段数据
+    segment.Start = pixel0.rgb;
+    segment.End = pixel1.rgb;
+    segment.PolygonIndex = (uint) pixel0.a;
+    
+    return segment;
+}
+
+// BVH查询函数
+float QueryBVH(float3 worldPosition, Texture2D<float4> BVHDataTexture, Texture2D<float4> SegmentDataTexture, float LineWidth, out float2 TextureUV)
+{
+    float closestDistance = MAX_DISTANCE;
+    
+    // 使用栈代替递归
+    int stack[256];
+    int stackPtr = 0;
+    
+    // 从根节点开始（索引0）
+    stack[stackPtr++] = 0;
+    
+    uint loopCounter = 0;
+    const uint MAX_LOOPS = 600; // 最大循环次数
+    
+     // 计算世界位置的XY平面
+    float2 worldPos2D = worldPosition.xy;
+
+    [loop]
+    while (stackPtr > 0)
+    {
+        loopCounter++;
+        if (loopCounter > MAX_LOOPS)
+        {
+            return 1;
+        }
+        
+        // 弹出当前节点
+        int currentNodeIndex = stack[--stackPtr];
+
+        // 读取节点数据
+        FGPUBVHNode node = ReadBVHNode(currentNodeIndex, BVHDataTexture);
+        
+        // 节点有效性检查
+        if (!IsValidNode(node))
+        {
+            continue;
+        }
+
+        // 计算worldPosition到当前节点包围盒的距离（在包围盒内部时distanceToBox为0）
+        float distanceToBox = PointToAABBDistance2D(worldPos2D, node.MinExtent.xy, node.MaxExtent.xy);
+        
+        // 如果worldPosition在当前节点的包围盒的外部，可以剪枝
+        if (distanceToBox > LineWidth)
+        {
+            continue;
+        }
+        
+        if (node.IsLeaf)
+        {
+            // 叶子节点：处理所有线段
+            for (int i = 0; i < node.SegmentCount; i++)
+            {
+                uint segmentIndex = node.SegmentStart + i;
+                FGPUSegment segment = ReadSegment(segmentIndex, SegmentDataTexture);
+
+                float segmentDistance = PointToSegmentDistance2D(worldPos2D, segment.Start.xy, segment.End.xy, TextureUV.y);
+                closestDistance = min(closestDistance, segmentDistance);
+
+                // 如果在线段内，可以直接返回
+                if (closestDistance < LineWidth)
+                {
+                    TextureUV.x = closestDistance / LineWidth * 0.5 + 0.5;
+                    if (loopCounter < 50)
+                        return 2;
+                    if (loopCounter < 100)
+                        return 3;
+                    if (loopCounter < 200)
+                        return 4;
+                    if (loopCounter < 400)
+                        return 5;
+                    if (loopCounter < 600)
+                        return 6;
+                    return closestDistance;
+                }
+            }
+        }
+        else
+        {
+            // 内部节点：根据距离优化处理顺序
+            FGPUBVHNode leftChild = ReadBVHNode(node.LeftChild, BVHDataTexture);
+            FGPUBVHNode rightChild = ReadBVHNode(node.RightChild, BVHDataTexture);
+            
+            float leftDistance = PointToAABBDistance2D(worldPos2D, leftChild.MinExtent.xy, leftChild.MaxExtent.xy);
+            float rightDistance = PointToAABBDistance2D(worldPos2D, rightChild.MinExtent.xy, rightChild.MaxExtent.xy);
+            
+            if (leftDistance < LineWidth)
+                stack[stackPtr++] = node.LeftChild;
+            
+            if (rightDistance < LineWidth)
+                stack[stackPtr++] = node.RightChild;
+        }
+    }
+    
+    return closestDistance;
+}
+
+float4 ReadSegmentDataTexture(uint2 UV, Texture2D<float4> InSegmentDataTexture)
+{
+    float4 pixel0 = InSegmentDataTexture.Load(uint3(UV.x, UV.y, 0));
+    float4 pixel1 = InSegmentDataTexture.Load(uint3(UV.x + 1, UV.y, 0));
+
+    return pixel1;
+}
+
+float4 ReadBVHDataTexture(uint2 UV, Texture2D<float4> InBVHDataTexture)
+{
+    return InBVHDataTexture.Load(uint3(UV.x, UV.y, 0));
+}
+
+Texture2D DepthTexture;
+Texture2D ColorTexture;
+
+Texture2D BVHDataTexture;
+Texture2D SegmentDataTexture;
+Texture2D CustomTexture;
+SamplerState CustomTextureSampler;
+
+float4x4 ScreenPositionToWorldPosition;
+int4 ViewportRect;
+float LineWidth;
+float LineOpacity;
+float4 LineColor;
+
+void MainPixelShader(in float4 SV_Position : SV_Position, out float4 OutColor : SV_Target0)
+{
+    // 采样纹理
+    float Depth = DepthTexture.Load(uint3(SV_Position.xy, 0)).r;
+    float4 Color = ColorTexture.Load(uint3(SV_Position.xy, 0));
+    
+    // 将屏幕坐标转换为NDC坐标
+    float2 NormalizedScreenPosition = float2(SV_Position.x / ViewportRect.z, SV_Position.y / ViewportRect.w);
+    float4 NDCPosition = float4(NormalizedScreenPosition.x * 2.0 - 1.0, (1.0 - NormalizedScreenPosition.y) * 2.0 - 1.0, Depth, 1.0);
+
+    // 使用逆矩阵转换到世界空间
+    float4 WorldPosition = mul(NDCPosition, ScreenPositionToWorldPosition);
+    WorldPosition.xyz /= WorldPosition.w;
+    
+    float2 TextureUV;
+    float distanceToPolygons = QueryBVH(WorldPosition.xyz, BVHDataTexture, SegmentDataTexture, LineWidth, TextureUV);
+     // 采样自定义纹理
+    float4 CustomTextureColor = CustomTexture.Sample(CustomTextureSampler, TextureUV);
+    
+    // debug栈溢出的情况
+    if (distanceToPolygons == 1)
+    {
+        OutColor = float4(0, 0, 0, 1);
+    }
+    // debug loop次数在指定范围
+    else if (distanceToPolygons == 2)
+    {
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 绿色
+    }
+    else if (distanceToPolygons == 3)
+    {
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 黄色
+    }
+    else if (distanceToPolygons == 4)
+    {
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 红色
+    }
+    else if (distanceToPolygons == 5)
+    {
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 蓝色
+    }
+    else if (distanceToPolygons == 6)
+    {
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 青色
+    }
+    // 表示在多边形的线段内
+    else if (distanceToPolygons < LineWidth)
+    {
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 白色
+    }
+    else
+    {
+        OutColor = Color;
+    }
+
+}
