@@ -20,7 +20,7 @@
 		{
 			"Name": "UtilityTools",
 			"Type": "Runtime",
-			"LoadingPhase": "PostConfigInit"
+			"LoadingPhase": "Default"
 		}
 	],
 

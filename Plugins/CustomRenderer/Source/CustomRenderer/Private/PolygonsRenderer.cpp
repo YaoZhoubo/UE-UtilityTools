@@ -1,4 +1,6 @@
-﻿#include "PolygonsRenderer.h"
+﻿// Copyright(c) 2025 YaoZhoubo. All rights reserved.
+
+#include "PolygonsRenderer.h"
 
 #include "GlobalShader.h"
 #include "ShaderParameterStruct.h"
