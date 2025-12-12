@@ -26,6 +26,7 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, BVHDataTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SegmentDataTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CustomTexture)
+		SHADER_PARAMETER_SAMPLER(SamplerState, CustomTextureSampler)
 		SHADER_PARAMETER(FMatrix44f, ScreenPositionToWorldPosition)
 		SHADER_PARAMETER(FIntRect, ViewportRect)
 		SHADER_PARAMETER(float, LineWidth)
@@ -43,7 +44,7 @@ public:
 };
 
 // 创建着色器           着色器类					着色器文件位置							着色器入口函数名     着色器类型
-IMPLEMENT_GLOBAL_SHADER(FPolygonsRenderPS, "/CustomShaders/PolygonsRenderShader.usf", "MainPixelShader", SF_Pixel);
+IMPLEMENT_GLOBAL_SHADER(FPolygonsRenderPS, "/CustomRenderer/PolygonsRenderShader.usf", "MainPixelShader", SF_Pixel);
 
 // 着色器管理器实例初始化
 FPolygonsRenderManager* FPolygonsRenderManager::Instance = nullptr;
@@ -133,7 +134,7 @@ void FPolygonsRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters& P
 		CreateRenderTarget(SegmentsDataTextureResource->GetRenderTargetTexture(), TEXT("SegmentsDataTexture"))
 	);
 
-	FTextureRHIRef CustomTextureResource = SceneProxy->CustomTexture->Resource->TextureRHI;
+	FTextureRHIRef CustomTextureResource = SceneProxy->CustomTexture->GetResource()->TextureRHI;
 	FRDGTextureRef CustomTextureRDG = GraphBuilder.RegisterExternalTexture(
 		CreateRenderTarget(CustomTextureResource, TEXT("CustomTexture"))
 	);
@@ -141,6 +142,9 @@ void FPolygonsRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters& P
 	PassParameters->BVHDataTexture = NodesDataTextureRDG;
 	PassParameters->SegmentDataTexture = SegmentsDataTextureRDG;
 	PassParameters->CustomTexture = CustomTextureRDG;
+
+	// 设置采样器参数
+	PassParameters->CustomTextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 
 	// 绑定输出渲染目标
 	FRDGTextureDesc OutputDesc = Parameters.ColorTexture->Desc;// 创建输出纹理（与颜色纹理相同的格式和尺寸）

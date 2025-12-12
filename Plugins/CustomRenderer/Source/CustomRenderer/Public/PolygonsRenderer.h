@@ -55,7 +55,7 @@ private:
 	friend class FPolygonsRenderManager;
 };
 
-class CUSTOMSHADERS_API FPolygonsRenderManager
+class CUSTOMRENDERER_API FPolygonsRenderManager
 {
 public:
 	static FPolygonsRenderManager* Get()
