@@ -20,8 +20,7 @@ public:
 	SHADER_USE_PARAMETER_STRUCT(FPolygonsRenderPS, FGlobalShader);
 
 	// 着色器参数结构声明
-	// 参数必须与HLSL代码中的参数匹配
-	// 对于每个参数，提供C++类型和名称（与HLSL代码中使用的名称相同）
+	// 参数与HLSL代码中的参数匹配
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, DepthTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ColorTexture)
@@ -30,6 +29,7 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CustomTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, CustomTextureSampler)
 		SHADER_PARAMETER(FMatrix44f, ScreenPositionToWorldPosition)
+		SHADER_PARAMETER(FMatrix44f, InvViewMatrix)
 		SHADER_PARAMETER(FIntRect, ViewportRect)
 		SHADER_PARAMETER(float, LineWidth)
 		SHADER_PARAMETER(float, LineOpacity)
@@ -45,7 +45,7 @@ public:
 	}
 };
 
-// 创建着色器           着色器类					着色器文件位置							着色器入口函数名     着色器类型
+// 创建着色器			着色器类			着色器文件位置							着色器入口函数名	着色器类型
 IMPLEMENT_GLOBAL_SHADER(FPolygonsRenderPS, "/CustomRenderer/PolygonsRenderShader.usf", "MainPixelShader", SF_Pixel);
 
 // 着色器管理器实例初始化
@@ -53,13 +53,13 @@ FPolygonsRenderManager* FPolygonsRenderManager::Instance = nullptr;
 
 void FPolygonsRenderManager::BeginRendering()
 {
-	// 如果句柄已经初始化并且有效，则无需执行任何操作
+	// 如果已经注册回调，直接返回
 	if (OnOverlayRenderHandle.IsValid())
 	{
 		return;
 	}
 
-	// 获取渲染模块，将 Execute_RenderThread 添加到回调中，以便在场景渲染完成后每一帧执行
+	// 获取渲染模块，将 Execute_RenderThread 注册到OverlayRender阶段
 	const FName RendererModuleName("Renderer");
 	IRendererModule* RendererModule = FModuleManager::GetModulePtr<IRendererModule>(RendererModuleName);
 	if (RendererModule)
@@ -145,9 +145,6 @@ void FPolygonsRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters& P
 	PassParameters->SegmentDataTexture = SegmentsDataTextureRDG;
 	PassParameters->CustomTexture = CustomTextureRDG;
 
-	// 设置采样器参数
-	PassParameters->CustomTextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-
 	// 绑定输出渲染目标
 	FRDGTextureDesc OutputDesc = Parameters.ColorTexture->Desc;// 创建输出纹理（与颜色纹理相同的格式和尺寸）
 	FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(OutputDesc, TEXT("ColorTextureOverlay"));
@@ -158,15 +155,20 @@ void FPolygonsRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters& P
 
 	// 计算屏幕位置到世界位置的变换矩阵
 	FMatrix InvViewProjMatrix = Parameters.ViewMatrix * Parameters.ProjMatrix;
-	InvViewProjMatrix = InvViewProjMatrix.Inverse(); 
+	InvViewProjMatrix = InvViewProjMatrix.Inverse();
 	PassParameters->ScreenPositionToWorldPosition = FMatrix44f(InvViewProjMatrix);
+
+	PassParameters->InvViewMatrix = FMatrix44f(Parameters.ViewMatrix).Inverse();
 
 	// 设置线参数
 	PassParameters->LineWidth = SceneProxy->LineWidth;
 	PassParameters->LineOpacity = SceneProxy->LineOpacity;
 	PassParameters->LineColor = SceneProxy->LineColor;
 
-	// 获取全局着色器
+	// 设置采样器参数
+	PassParameters->CustomTextureSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+
+	// 获取着色器
 	TShaderMapRef<FPolygonsRenderPS> PixelShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 	// 添加全屏pass

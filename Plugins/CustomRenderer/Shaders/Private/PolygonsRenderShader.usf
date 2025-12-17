@@ -193,7 +193,7 @@ float QueryBVH(float3 worldPosition, Texture2D<float4> BVHDataTexture, Texture2D
     stack[stackPtr++] = 0;
     
     uint loopCounter = 0;
-    const uint MAX_LOOPS = 600; // 最大循环次数
+    const uint MAX_LOOPS = 1000; // 最大循环次数
     
      // 计算世界位置的XY平面
     float2 worldPos2D = worldPosition.xy;
@@ -299,10 +299,51 @@ Texture2D CustomTexture;
 SamplerState CustomTextureSampler;
 
 float4x4 ScreenPositionToWorldPosition;
+float4x4 InvViewMatrix;
 int4 ViewportRect;
 float LineWidth;
 float LineOpacity;
 float4 LineColor;
+
+// 计算像素在世界空间中的大小
+float CalculatePixelWorldSize(float3 worldPosition, float4x4 inInvViewMatrix, float2 screenUV, int4 viewportRect)
+{
+    // 定义相机
+    float cameraFOV = 1.5708;
+    int viewportHeight = viewportRect.w;
+    int viewportWidth = viewportRect.z;
+    
+    float3 cameraPosition = inInvViewMatrix[3].xyz;
+    
+    // 计算距离
+    float distanceToCamera = length(worldPosition - cameraPosition);
+    if (distanceToCamera > MAX_DISTANCE)
+    {
+        return 0;
+    }
+     // 计算视线方向
+    float3 viewDirection = normalize(worldPosition - cameraPosition);
+    
+     // 计算垂直方向的像素大小
+    float verticalPixelSize = (2.0 * distanceToCamera * tan(cameraFOV * 0.5)) / viewportHeight;
+    
+     // 计算水平方向的像素大小
+    float aspectRatio = (float) viewportWidth / viewportHeight;
+    float horizontalPixelSize = verticalPixelSize * aspectRatio;
+    
+    // 计算当前像素偏移，转换为[-1, 1]范围
+    float2 screenOffset = (screenUV - 0.5) * 2.0;
+   
+    // 透视矫正
+    float perspectiveCorrection = 1.0;
+    float cosTheta = sqrt(screenOffset.x * screenOffset.x * aspectRatio * aspectRatio + screenOffset.y * screenOffset.y + aspectRatio);
+    perspectiveCorrection = 1.0 / cosTheta;
+    
+    // 返回平均像素大小
+    float pixelWorldSize = 0.5 * (horizontalPixelSize + verticalPixelSize) * perspectiveCorrection;
+    
+    return pixelWorldSize;
+}
 
 void MainPixelShader(in float4 SV_Position : SV_Position, out float4 OutColor : SV_Target0)
 {
@@ -318,45 +359,52 @@ void MainPixelShader(in float4 SV_Position : SV_Position, out float4 OutColor : 
     float4 WorldPosition = mul(NDCPosition, ScreenPositionToWorldPosition);
     WorldPosition.xyz /= WorldPosition.w;
     
-    float2 TextureUV;
-    float distanceToPolygons = QueryBVH(WorldPosition.xyz, BVHDataTexture, SegmentDataTexture, LineWidth, TextureUV);
+    // 计算像素世界大小
+    float pixelWorldSize = CalculatePixelWorldSize(WorldPosition.xyz, InvViewMatrix, NormalizedScreenPosition, ViewportRect);
+    
+    // 将世界空间的LineWidth转换为像素单位
+    float lineWidthInPixels = LineWidth * pixelWorldSize * 0.5;
+    
+    // 用于计算线段纹理坐标
+    float2 LineTexCoord;
+    float distanceToPolygons = QueryBVH(WorldPosition.xyz, BVHDataTexture, SegmentDataTexture, LineWidth, LineTexCoord);
      // 采样自定义纹理
-    float4 CustomTextureColor = CustomTexture.Sample(CustomTextureSampler, TextureUV);
+    float4 CustomTextureColor = CustomTexture.Sample(CustomTextureSampler, LineTexCoord);
     
     // debug栈溢出的情况
     if (distanceToPolygons == 1)
     {
         OutColor = float4(0, 0, 0, 1);
     }
+        
     // debug loop次数在指定范围
     else if (distanceToPolygons == 2)
     {
-        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 绿色
+        OutColor = lerp(Color, float4(0, 1, 0, 1), LineOpacity); // 绿色 <= 50
     }
     else if (distanceToPolygons == 3)
     {
-        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 黄色
+        OutColor = lerp(Color, float4(0, 0.5, 0, 1), LineOpacity); // 淡绿色 <= 100
     }
     else if (distanceToPolygons == 4)
     {
-        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 红色
+        OutColor = lerp(Color, float4(1, 1, 0, 1), LineOpacity); // 黄色 <= 200
     }
     else if (distanceToPolygons == 5)
     {
-        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 蓝色
+        OutColor = lerp(Color, float4(0.5, 0.5, 0, 1), LineOpacity); // 淡黄色 <= 400
     }
     else if (distanceToPolygons == 6)
     {
-        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 青色
+        OutColor = lerp(Color, float4(1, 0, 0, 1), LineOpacity); // 红色 <= 600
     }
     // 表示在多边形的线段内
     else if (distanceToPolygons < LineWidth)
     {
-        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 白色
+        OutColor = lerp(Color, float4(0.5, 0, 0, 1), LineOpacity); // 淡红色 > 600
     }
     else
     {
         OutColor = Color;
     }
-
 }

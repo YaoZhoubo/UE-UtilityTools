@@ -6,13 +6,12 @@
 #include "Engine/TextureRenderTarget2D.h"
 
 
-class FBVHProxy;
 class UBVHComponent;
 
 class  FPolygonsSceneProxy
 {
 public:
-	FPolygonsSceneProxy() : NodesDataTexture(nullptr), SegmentsDataTexture(nullptr), CustomTexture(nullptr), LineWidth(0.0f), LineOpacity(0.0f){}
+	FPolygonsSceneProxy() : NodesDataTexture(nullptr), SegmentsDataTexture(nullptr), CustomTexture(nullptr), LineWidth(0.0f), LineOpacity(0.0f) {}
 	FPolygonsSceneProxy(UTextureRenderTarget2D* InNodesDataTexture, UTextureRenderTarget2D* InSegmentsDataTexture, UTexture2D* InCustomTexture, float InLineWidth, float InLineOpacity, FLinearColor InLineColor)
 		: NodesDataTexture(InNodesDataTexture)
 		, SegmentsDataTexture(InSegmentsDataTexture)
@@ -45,8 +44,8 @@ public:
 	}
 
 private:
-	UTextureRenderTarget2D* NodesDataTexture;
-	UTextureRenderTarget2D* SegmentsDataTexture;
+	TObjectPtr<UTextureRenderTarget2D> NodesDataTexture;
+	TObjectPtr<UTextureRenderTarget2D> SegmentsDataTexture;
 	UTexture2D* CustomTexture;
 	float LineWidth;
 	float LineOpacity;

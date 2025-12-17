@@ -2,6 +2,7 @@
 
 #include "BVHDrawer/BVHComponent.h"
 
+#include "BVHDrawer/BVHAccelerator.h"
 #include "PolygonsRenderer.h"
 
 
@@ -13,6 +14,12 @@ UBVHComponent::UBVHComponent()
 
 	NodesDataTexture = nullptr;
 	SegmentsDataTexture = nullptr;
+	IsAsyncBuilding.store(false);
+
+	// 初始化线段渲染默认参数
+	LineWidth = 2.0f;
+	LineOpacity = 0.5f;
+	LineColor = FLinearColor::Green;
 }
 
 void UBVHComponent::BeginPlay()
@@ -25,21 +32,27 @@ void UBVHComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorCo
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 }
 
-#if WITH_EDITOR
-void UBVHComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+void UBVHComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
 {
-	Super::PostEditChangeProperty(PropertyChangedEvent);
+	Super::CreateRenderState_Concurrent(Context);
 
-	FName PropertyName = (PropertyChangedEvent.Property != nullptr) ?
-		PropertyChangedEvent.Property->GetFName() : NAME_None;
+	CreateSceneProxy();
 
-	// BuildConfig改变时，更新数据纹理
-	if (PropertyName == GET_MEMBER_NAME_CHECKED(UBVHComponent, BuildConfig))
-	{
-		AsyncBuildBVHData();
-	}
+	FPolygonsRenderManager* PolygonsRenderManager = FPolygonsRenderManager::Get();
+	PolygonsRenderManager->RegisterSceneProxy(PolygonsSceneProxy);
+	PolygonsRenderManager->BeginRendering();
 }
-#endif
+
+void UBVHComponent::DestroyRenderState_Concurrent()
+{
+	FPolygonsRenderManager* PolygonsRenderManager = FPolygonsRenderManager::Get();
+	PolygonsRenderManager->EndRendering();
+	PolygonsRenderManager->UnregisterSceneProxy(PolygonsSceneProxy);
+
+	DestroySceneProxy();
+
+	Super::DestroyRenderState_Concurrent();
+}
 
 void UBVHComponent::SetPolygons(const TArray<FPolygon>& InPolygons)
 {
@@ -48,14 +61,46 @@ void UBVHComponent::SetPolygons(const TArray<FPolygon>& InPolygons)
 	AsyncBuildBVHData();
 }
 
+void UBVHComponent::SetProperties(float InLineWidth, float InLineOpacity, const FLinearColor& InLineColor)
+{
+	LineWidth = InLineWidth;
+	LineOpacity = InLineOpacity;
+	LineColor = InLineColor;
+
+	UpdateSceneProxy();
+}
+
+void UBVHComponent::SetLineColor(const FLinearColor& InLineColor)
+{
+	LineColor = InLineColor;
+
+	UpdateSceneProxy();
+}
+
+void UBVHComponent::SetLineOpacity(const float InLineOpacity)
+{
+	LineOpacity = InLineOpacity;
+
+	UpdateSceneProxy();
+}
+
+void UBVHComponent::SetLineWidth(const float InLineWidth)
+{
+	LineWidth = InLineWidth;
+
+	UpdateSceneProxy();
+}
+
 void UBVHComponent::ClearPolygons()
 {
 	Polygons.Empty();
+
+	AsyncBuildBVHData();
 }
 
 void UBVHComponent::GenerateRandomTestData()
 {
-	ClearPolygons();
+	Polygons.Empty();
 
 	// 计算网格划分：尽量接近正方形的网格
 	int32 GridSize = FMath::CeilToInt(FMath::Sqrt(static_cast<float>(RandomPolygonCount)));
@@ -133,40 +178,42 @@ void UBVHComponent::GenerateRandomTestData()
 	AsyncBuildBVHData();
 }
 
-void UBVHComponent::SetLineColor(const FLinearColor& InLineColor)
-{
-	LineColor = InLineColor;
-
-	UpdateSceneProxy();
-}
-
-void UBVHComponent::SetLineOpacity(const float InLineOpacity)
-{
-	LineOpacity = InLineOpacity;
-
-	UpdateSceneProxy();
-}
-
-void UBVHComponent::SetLineWidth(const float InLineWidth)
-{
-	LineWidth = InLineWidth;
-
-	UpdateSceneProxy();
-}
-
 void UBVHComponent::AsyncBuildBVHData()
 {
+	if (Polygons.Num() == 0)
+	{
+		UE_LOG(LogBVHComponent, Warning, TEXT("Polygons为空，跳过构建"));
+		NodesDataTexture = nullptr;
+		SegmentsDataTexture = nullptr;
+		return;
+	}
+
+	int32 SegmentsNum = 0;
+	for (auto Polygon : Polygons)
+	{
+		SegmentsNum += Polygon.Vertices.Num();
+	}
+	if (SegmentsNum < 2)
+	{
+		UE_LOG(LogBVHComponent, Warning, TEXT("Polygons中的线段不足2，跳过构建"));
+		NodesDataTexture = nullptr;
+		SegmentsDataTexture = nullptr;
+		return;
+	}
+
+	if (IsAsyncBuilding.load())
+	{
+		UE_LOG(LogBVHComponent, Warning, TEXT("正在进行上一次的AsyncBuildBVHData请求，跳过构建"));
+		return;
+	}
+
+	IsAsyncBuilding.store(true);
+
 	TWeakObjectPtr<UBVHComponent> WeakThis(this);
 
 	AsyncTask(ENamedThreads::AnyThread,
 		[WeakThis]()
 		{
-			if (WeakThis->Polygons.Num() == 0)
-			{
-				UE_LOG(LogBVHComponent, Warning, TEXT("Polygons为空"));
-				return;
-			}
-
 			// 记录构建开始时间
 			double BuildStartTime = FPlatformTime::Seconds();
 
@@ -189,6 +236,8 @@ void UBVHComponent::AsyncBuildBVHData()
 				UE_LOG(LogBVHComponent, Warning, TEXT("组件已销毁，取消AsyncBuildBVHData"));
 				return;
 			}
+
+			WeakThis->IsAsyncBuilding.store(false);
 
 			// 记录构建耗时
 			WeakThis->BVHStats.BuildTimeMs = (FPlatformTime::Seconds() - BuildStartTime) * 1000.0;
@@ -232,7 +281,7 @@ UTextureRenderTarget2D* UBVHComponent::CreateDefaultTextureForBVH(const FString&
 	{
 		RenderTarget->InitAutoFormat(1, 1);
 		RenderTarget->RenderTargetFormat = RTF_RGBA32f; // 对应GPU数据格式
-		RenderTarget->ClearColor = FLinearColor::Black;
+		RenderTarget->ClearColor = FLinearColor::Blue;
 		RenderTarget->TargetGamma = 0.0f; // 禁用gamma校正，保持线性空间
 		RenderTarget->UpdateResource();
 	}
@@ -243,46 +292,24 @@ UTextureRenderTarget2D* UBVHComponent::CreateDefaultTextureForBVH(const FString&
 void UBVHComponent::CreateSceneProxy()
 {
 	check(IsInGameThread());
-	RenderParameters = new FPolygonsSceneProxy(NodesDataTexture, SegmentsDataTexture, CustomTexture, LineWidth, LineOpacity, LineColor);
+	PolygonsSceneProxy = new FPolygonsSceneProxy(NodesDataTexture, SegmentsDataTexture, CustomTexture, LineWidth, LineOpacity, LineColor);
 }
 
 void UBVHComponent::UpdateSceneProxy()
 {
-	if (RenderParameters)
+	if (PolygonsSceneProxy)
 	{
 		// 更新渲染代理参数
-		RenderParameters->UpdateParameters(NodesDataTexture, SegmentsDataTexture, CustomTexture, LineWidth, LineOpacity, LineColor);
+		PolygonsSceneProxy->UpdateParameters(NodesDataTexture, SegmentsDataTexture, CustomTexture, LineWidth, LineOpacity, LineColor);
 	}
 }
 
 void UBVHComponent::DestroySceneProxy()
 {
 	check(IsInGameThread());
-	if (RenderParameters)
+	if (PolygonsSceneProxy)
 	{
-		delete RenderParameters;
-		RenderParameters = nullptr;
+		delete PolygonsSceneProxy;
+		PolygonsSceneProxy = nullptr;
 	}
-}
-
-void UBVHComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
-{
-	Super::CreateRenderState_Concurrent(Context);
-
-	CreateSceneProxy();
-
-	FPolygonsRenderManager* PolygonsRenderManager = FPolygonsRenderManager::Get();
-	PolygonsRenderManager->RegisterSceneProxy(RenderParameters);
-	PolygonsRenderManager->BeginRendering();
-}
-
-void UBVHComponent::DestroyRenderState_Concurrent()
-{
-	FPolygonsRenderManager* PolygonsRenderManager = FPolygonsRenderManager::Get();
-	PolygonsRenderManager->UnregisterSceneProxy(RenderParameters);
-	PolygonsRenderManager->EndRendering();
-
-	DestroySceneProxy();
-
-	Super::DestroyRenderState_Concurrent();
 }
