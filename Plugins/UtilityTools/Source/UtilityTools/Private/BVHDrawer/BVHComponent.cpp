@@ -292,6 +292,7 @@ UTextureRenderTarget2D* UBVHComponent::CreateDefaultTextureForBVH(const FString&
 void UBVHComponent::CreateSceneProxy()
 {
 	check(IsInGameThread());
+
 	PolygonsSceneProxy = new FPolygonsSceneProxy(NodesDataTexture, SegmentsDataTexture, CustomTexture, LineWidth, LineOpacity, LineColor);
 }
 
@@ -299,17 +300,38 @@ void UBVHComponent::UpdateSceneProxy()
 {
 	if (PolygonsSceneProxy)
 	{
-		// 更新渲染代理参数
-		PolygonsSceneProxy->UpdateParameters(NodesDataTexture, SegmentsDataTexture, CustomTexture, LineWidth, LineOpacity, LineColor);
+		// 渲染线程更新参数
+		ENQUEUE_RENDER_COMMAND(UpdateSceneProxyCommand)(
+			[Proxy = PolygonsSceneProxy,
+			NodesTex = NodesDataTexture,
+			SegmentsTex = SegmentsDataTexture,
+			CustomTex = CustomTexture,
+			Width = LineWidth,
+			Opacity = LineOpacity,
+			Color = LineColor](FRHICommandList& RHICmdList)
+			{
+				if (Proxy)
+				{
+					Proxy->UpdateParameters(NodesTex, SegmentsTex, CustomTex, Width, Opacity, Color);
+				}
+			});
 	}
 }
 
 void UBVHComponent::DestroySceneProxy()
 {
-	check(IsInGameThread());
 	if (PolygonsSceneProxy)
 	{
-		delete PolygonsSceneProxy;
+		FPolygonsSceneProxy* LocalSceneProxy = PolygonsSceneProxy;
+
+		// 立即清空引用，防止后续访问
 		PolygonsSceneProxy = nullptr;
+
+		// 渲染线程销毁
+		ENQUEUE_RENDER_COMMAND(DestroyPolygonsSceneProxyCommand)(
+			[LocalSceneProxy](FRHICommandList& RHICmdList)
+			{
+				delete LocalSceneProxy;
+			});
 	}
 }

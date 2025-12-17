@@ -24,8 +24,6 @@ public:
 
 	void UpdateParameters(UTextureRenderTarget2D* InNodesDataTexture, UTextureRenderTarget2D* InSegmentsDataTexture, UTexture2D* InCustomTexture, float InLineWidth, float InLineOpacity, const FLinearColor& InLineColor)
 	{
-		FScopeLock Lock(&ProxyCriticalSection);
-
 		NodesDataTexture = InNodesDataTexture;
 		SegmentsDataTexture = InSegmentsDataTexture;
 		CustomTexture = InCustomTexture;
@@ -51,8 +49,6 @@ private:
 	float LineOpacity;
 	FLinearColor LineColor;
 
-	mutable FCriticalSection ProxyCriticalSection;
-
 	friend class FPolygonsRenderManager;
 };
 
@@ -62,7 +58,9 @@ public:
 	static FPolygonsRenderManager* Get()
 	{
 		if (!Instance)
+		{
 			Instance = new FPolygonsRenderManager();
+		}
 		return Instance;
 	};
 

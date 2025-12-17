@@ -95,15 +95,24 @@ void FPolygonsRenderManager::EndRendering()
 
 void FPolygonsRenderManager::RegisterSceneProxy(FPolygonsSceneProxy* InSceneProxy)
 {
-	if (InSceneProxy)
-	{
-		SceneProxy = InSceneProxy;
-	}
+	FPolygonsSceneProxy* LocalSceneProxy = InSceneProxy;
+
+	// 在渲染线程中注册
+	ENQUEUE_RENDER_COMMAND(RegisterSceneProxyCommand)(
+		[this, LocalSceneProxy](FRHICommandList& RHICmdList)
+		{
+			SceneProxy = LocalSceneProxy;
+		});
 }
 
 void FPolygonsRenderManager::UnregisterSceneProxy(FPolygonsSceneProxy* InSceneProxy)
 {
-	SceneProxy = nullptr;
+	// 在渲染线程中注销
+	ENQUEUE_RENDER_COMMAND(RegisterSceneProxyCommand)(
+		[this](FRHICommandList& RHICmdList)
+		{
+			SceneProxy = nullptr;
+		});
 }
 
 void FPolygonsRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters& Parameters)
