@@ -49,10 +49,22 @@ float PointToSegmentDistance(float3 inPoint, float3 segmentStart, float3 segment
 }
 
 // 2D 线段距离计算
-float PointToSegmentDistance2D(float2 inPoint, float2 segmentStart, float2 segmentEnd, out float outT)
+float PointToSegmentDistance2D(float2 inPoint, float2 segmentStart, float2 segmentEnd, out float outTextureY, out bool isLeft)
 {
     float2 segmentVec = segmentEnd - segmentStart;
     float2 pointVec = inPoint - segmentStart;
+    
+    float3 crossProduct = cross(float3(pointVec, 0), float3(segmentVec, 0));
+    
+    // 如果叉积为正，点在左侧
+    if (crossProduct.z > 0)
+    {
+        isLeft = true;
+    }
+    else
+    {
+        isLeft = false;
+    }
     
     float segmentLengthSq = dot(segmentVec, segmentVec);
     
@@ -65,10 +77,13 @@ float PointToSegmentDistance2D(float2 inPoint, float2 segmentStart, float2 segme
     float t = dot(pointVec, segmentVec) / segmentLengthSq;
     t = clamp(t, 0.0, 1.0);
     
-    outT = t;
+    // 采样由上到下，
+    outTextureY = 1 - t;
     
     float2 projection = segmentStart + t * segmentVec;
     float2 delta = inPoint - projection;
+    
+
     
     return sqrt(dot(delta, delta));
 }
@@ -236,13 +251,22 @@ float QueryBVH(float3 worldPosition, Texture2D<float4> BVHDataTexture, Texture2D
                 uint segmentIndex = node.SegmentStart + i;
                 FGPUSegment segment = ReadSegment(segmentIndex, SegmentDataTexture);
 
-                float segmentDistance = PointToSegmentDistance2D(worldPos2D, segment.Start.xy, segment.End.xy, TextureUV.y);
+                bool isLeft;
+                float segmentDistance = PointToSegmentDistance2D(worldPos2D, segment.Start.xy, segment.End.xy, TextureUV.y, isLeft);
                 closestDistance = min(closestDistance, segmentDistance);
 
                 // 如果在线段内，可以直接返回
                 if (closestDistance < LineWidth)
                 {
-                    TextureUV.x = closestDistance / LineWidth * 0.5 + 0.5;
+                    if (isLeft)
+                    {
+                        TextureUV.x = 0.5 - closestDistance / LineWidth * 0.5f;
+                    }
+                    else
+                    {
+                        TextureUV.x = 0.5 + closestDistance / LineWidth * 0.5f;
+                    }
+                    
                     if (loopCounter < 50)
                         return 2;
                     if (loopCounter < 100)
@@ -367,10 +391,11 @@ void MainPixelShader(in float4 SV_Position : SV_Position, out float4 OutColor : 
     
     // 用于计算线段纹理坐标
     float2 LineTexCoord;
-    float distanceToPolygons = QueryBVH(WorldPosition.xyz, BVHDataTexture, SegmentDataTexture, LineWidth, LineTexCoord);
+    float distanceToPolygons = QueryBVH(WorldPosition.xyz, BVHDataTexture, SegmentDataTexture, LineWidth * 0.5f, LineTexCoord);
+    
      // 采样自定义纹理
     float4 CustomTextureColor = CustomTexture.Sample(CustomTextureSampler, LineTexCoord);
-    
+
     // debug栈溢出的情况
     if (distanceToPolygons == 1)
     {
@@ -380,28 +405,28 @@ void MainPixelShader(in float4 SV_Position : SV_Position, out float4 OutColor : 
     // debug loop次数在指定范围
     else if (distanceToPolygons == 2)
     {
-        OutColor = lerp(Color, float4(0, 1, 0, 1), LineOpacity); // 绿色 <= 50
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 绿色 <= 50
     }
     else if (distanceToPolygons == 3)
     {
-        OutColor = lerp(Color, float4(0, 0.5, 0, 1), LineOpacity); // 淡绿色 <= 100
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 淡绿色 <= 100
     }
     else if (distanceToPolygons == 4)
     {
-        OutColor = lerp(Color, float4(1, 1, 0, 1), LineOpacity); // 黄色 <= 200
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 黄色 <= 200
     }
     else if (distanceToPolygons == 5)
     {
-        OutColor = lerp(Color, float4(0.5, 0.5, 0, 1), LineOpacity); // 淡黄色 <= 400
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 淡黄色 <= 400
     }
     else if (distanceToPolygons == 6)
     {
-        OutColor = lerp(Color, float4(1, 0, 0, 1), LineOpacity); // 红色 <= 600
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 红色 <= 600
     }
     // 表示在多边形的线段内
-    else if (distanceToPolygons < LineWidth)
+    else if (distanceToPolygons < LineWidth * 0.5f)
     {
-        OutColor = lerp(Color, float4(0.5, 0, 0, 1), LineOpacity); // 淡红色 > 600
+        OutColor = lerp(Color, CustomTextureColor, LineOpacity); // 淡红色 > 600
     }
     else
     {

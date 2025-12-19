@@ -22,11 +22,11 @@ public:
 	// 着色器参数结构声明
 	// 参数与HLSL代码中的参数匹配
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, DepthTexture)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ColorTexture)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, BVHDataTexture)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SegmentDataTexture)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CustomTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, DepthTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, ColorTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, BVHDataTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, SegmentDataTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, CustomTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, CustomTextureSampler)
 		SHADER_PARAMETER(FMatrix44f, ScreenPositionToWorldPosition)
 		SHADER_PARAMETER(FMatrix44f, InvViewMatrix)
@@ -92,7 +92,6 @@ void FPolygonsRenderManager::EndRendering()
 	}
 }
 
-
 void FPolygonsRenderManager::RegisterSceneProxy(FPolygonsSceneProxy* InSceneProxy)
 {
 	FPolygonsSceneProxy* LocalSceneProxy = InSceneProxy;
@@ -131,33 +130,49 @@ void FPolygonsRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters& P
 	FPolygonsRenderPS::FParameters* PassParameters = GraphBuilder.AllocParameters<FPolygonsRenderPS::FParameters>();
 
 	// 绑定输入纹理
-	PassParameters->DepthTexture = Parameters.DepthTexture;
-	PassParameters->ColorTexture = Parameters.ColorTexture;
+	FRDGTextureSRVRef DepthTextureSRV = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(Parameters.DepthTexture));
+	PassParameters->DepthTexture = DepthTextureSRV;
 
-	// 创建CPU端渲染目标的RDG纹理引用
+	FRDGTextureSRVRef ColorTextureSRV = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(Parameters.ColorTexture));
+	PassParameters->ColorTexture = ColorTextureSRV;
+
+	// 创建GPU端的RDG纹理引用
+	// NodesDataTexture
 	FTextureRenderTargetResource* NodesDataTextureResource = SceneProxy->NodesDataTexture->GetRenderTargetResource();
 	FRDGTextureRef NodesDataTextureRDG = GraphBuilder.RegisterExternalTexture(
 		CreateRenderTarget(NodesDataTextureResource->GetRenderTargetTexture(), TEXT("NodesDataTexture"))
 	);
+	FRDGTextureSRVRef NodesDataTextureSRV = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(NodesDataTextureRDG));
+	PassParameters->BVHDataTexture = NodesDataTextureSRV;
 
+	// SegmentsDataTexture
 	FTextureRenderTargetResource* SegmentsDataTextureResource = SceneProxy->SegmentsDataTexture->GetRenderTargetResource();
 	FRDGTextureRef SegmentsDataTextureRDG = GraphBuilder.RegisterExternalTexture(
 		CreateRenderTarget(SegmentsDataTextureResource->GetRenderTargetTexture(), TEXT("SegmentsDataTexture"))
 	);
+	FRDGTextureSRVRef SegmentsDataTextureSRV = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(SegmentsDataTextureRDG));
+	PassParameters->SegmentDataTexture = SegmentsDataTextureSRV;
 
-	FTextureRHIRef CustomTextureResource = SceneProxy->CustomTexture->GetResource()->TextureRHI;
-	FRDGTextureRef CustomTextureRDG = GraphBuilder.RegisterExternalTexture(
-		CreateRenderTarget(CustomTextureResource, TEXT("CustomTexture"))
-	);
-
-	PassParameters->BVHDataTexture = NodesDataTextureRDG;
-	PassParameters->SegmentDataTexture = SegmentsDataTextureRDG;
-	PassParameters->CustomTexture = CustomTextureRDG;
+	// CustomTexture
+	if(ensureMsgf(SceneProxy->CustomTexture, TEXT("请确保CustomTexture有效，否则会导致该pass无效")))
+	{
+		FTextureResource* CustomTextureResource = SceneProxy->CustomTexture->GetResource();
+		if (CustomTextureResource)
+		{
+			FRDGTextureRef CustomTextureRDG = GraphBuilder.RegisterExternalTexture(
+				CreateRenderTarget(CustomTextureResource->TextureRHI, TEXT("CustomTexture"))
+			);
+			FRDGTextureSRVRef CustomDataTextureSRV = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(CustomTextureRDG));
+			PassParameters->CustomTexture = CustomDataTextureSRV;
+		}
+	}
+	else
+	{
+		return;
+	}
 
 	// 绑定输出渲染目标
-	FRDGTextureDesc OutputDesc = Parameters.ColorTexture->Desc;// 创建输出纹理（与颜色纹理相同的格式和尺寸）
-	FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(OutputDesc, TEXT("ColorTextureOverlay"));
-	PassParameters->RenderTargets[0] = FRenderTargetBinding(OutputTexture, ERenderTargetLoadAction::EClear);
+	PassParameters->RenderTargets[0] = FRenderTargetBinding(Parameters.ColorTexture, Parameters.ColorTexture->HasBeenProduced() ? ERenderTargetLoadAction::ELoad : ERenderTargetLoadAction::ENoAction);
 
 	// 设置视口参数
 	PassParameters->ViewportRect = Parameters.ViewportRect;
@@ -192,7 +207,4 @@ void FPolygonsRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters& P
 		TStaticRasterizerState<>::GetRHI(),
 		TStaticDepthStencilState<false, CF_Always>::GetRHI()
 	);
-
-	// 用处理后的纹理覆盖ColorTexture
-	AddCopyTexturePass(GraphBuilder, OutputTexture, Parameters.ColorTexture);
 }
