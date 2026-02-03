@@ -11,7 +11,7 @@ public class UtilityTools : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"Core",
+                "Core",
 				"Engine",
 				"AssetRegistry",
 				"Renderer",
@@ -24,8 +24,10 @@ public class UtilityTools : ModuleRules
 				"CoreUObject",
 				"Slate",
 				"SlateCore",
-				"CustomRenderer"
-			}
+                "CustomRenderer",
+                "InputCore",
+                "UtilityRenderer"
+            }
 			);
 	}
 }

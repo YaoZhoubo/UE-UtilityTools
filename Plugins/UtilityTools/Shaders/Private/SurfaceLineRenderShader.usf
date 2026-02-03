@@ -1,0 +1,382 @@
+#include "/Engine/Public/Platform.ush"
+
+
+// =====================================================
+// BVH查询相关的常量定义
+// =====================================================
+static const float MAX_DISTANCE = 1e10;     ///< 最大查询距离
+static const float INVALID_DISTANCE = -1;   ///< 无效循环的返回距离
+static const int INVALID_NODE_INDEX = -1;   ///< 无效节点索引标识
+static const int MAX_LOOPS = 256;            ///< 最大循环次数
+
+// =====================================================
+// 数据结构定义
+// =====================================================
+/**
+ * BVH节点数据结构
+ */
+struct FGPULineBVHNode
+{
+    float3 MinExtent;   ///< 包围盒最小值					(12字节)
+    int LeftChild;      ///< 左子节点索引（-1表示无效）		(4字节)
+
+    float3 MaxExtent;   ///< 包围盒最大值					(12字节)
+    int RightChild;     ///< 右子节点索引（-1表示无效）		(4字节)
+
+    int ClusterIndex;   ///< 簇起始索引（仅叶子节点有效）	(4字节)
+    int IsLeaf;         ///< 是否为叶子节点					(4字节)
+    float Padding[2];   ///< 填充							(4 * 2字节)
+};
+
+/**
+ * 线段簇数据结构
+ */
+struct FGPUSegmentCluster
+{
+    float3 MinExtent;           ///< 包围盒最小值		(12字节)
+    int SegmentStartIndex;      ///< 线段起点			(4字节)
+
+    float3 MaxExtent;           ///< 包围盒最大值		(12字节)
+    int PolygonIndex;           ///< 所属多边形索引		(4字节)
+
+    int AllSegmentNum;          ///< 总线段数量			(4字节)
+    float Padding[3];           ///< 填充				(4 * 3字节)
+
+    int SegmentNumPerLOD[8];    ///< 每个LOD的线段数量	(4 * 8字节)
+};
+
+/**
+ * 线段数据结构
+ */
+struct FGPUSegment
+{
+    float3 Start;       ///< 线段起点		(12字节)
+    int PolygonIndex;   ///< 所属多边形索引	(4字节)
+
+    float3 End;         ///< 线段终点		(12字节)
+    float Padding;      ///< 填充			(4字节)
+};
+
+// =====================================================
+// 纹理和采样器声明
+// =====================================================
+Texture2D DepthTexture;                 ///< 场景深度纹理
+Texture2D ColorTexture;                 ///< 场景颜色纹理
+Texture2D<uint2> CustomDepthTexture;    ///< 场景自定义深度纹理（包含模板值）
+Texture2D CustomTexture;                ///< 自定义纹理（用于线条样式）
+SamplerState CustomTextureSampler;      ///< 自定义纹理采样器
+
+// =====================================================
+// 常量缓冲区
+// =====================================================
+float4x4 ScreenToWorld; ///< 屏幕坐标到世界坐标变换矩阵
+float4x4 InvViewMatrix; ///< 视图逆矩阵
+int4 ViewportRect;      ///< 视口矩形信息(x,y,width,height)
+float LineWidth;        ///< 基础线条宽度
+float LineOpacity;      ///< 线条不透明度
+float4 LineColor;       ///< 基础线条颜色
+uint bUseCustomTexture; ///< 是否使用自定义纹理
+uint bUsePixelUnit;     ///< 是否使用像素单位宽度
+
+// =====================================================
+// 结构化缓冲区
+// =====================================================
+StructuredBuffer<FGPULineBVHNode> LineBVHNodeData;       ///< BVH节点数据
+StructuredBuffer<FGPUSegmentCluster> SegmentClusterData; ///< 线段簇数据  
+StructuredBuffer<FGPUSegment> SegmentData;               ///< 线段数据
+
+// =====================================================
+// 工具函数实现
+// =====================================================
+/**
+ * 计算2D点到线段的距离
+ * @param InPoint 输入点坐标
+ * @param SegmentStart 线段起点
+ * @param SegmentEnd 线段终点
+ * @param OutTextureY 输出的纹理V坐标（沿线段方向）
+ * @param OutIsLeft 输出点是否在线段左侧（用于计算纹理U坐标）
+ * @return 点到线段的最短距离
+ */
+float PointToSegmentDistance2D(float2 InPoint, float2 SegmentStart, float2 SegmentEnd, out float OutTextureY, out bool OutIsLeft)
+{
+    float2 SegmentVec = SegmentEnd - SegmentStart;
+    float2 PointVec = InPoint - SegmentStart;
+    
+    // 计算叉积判断左右关系
+    float3 CrossProduct = cross(float3(PointVec, 0), float3(SegmentVec, 0));
+    if (CrossProduct.z > 0)
+    {
+        OutIsLeft = true;
+    }
+    else
+    {
+        OutIsLeft = false;
+    }
+    
+    float SegmentLengthSq = dot(SegmentVec, SegmentVec);
+    
+    if (SegmentLengthSq < 1e-8)
+    {
+        float2 Delta = InPoint - SegmentStart;
+        return sqrt(dot(Delta, Delta));
+    }
+    
+    float t = dot(PointVec, SegmentVec) / SegmentLengthSq;
+    t = clamp(t, 0.0, 1.0);
+    
+    // 采样由上到下
+    OutTextureY = clamp(1 - t, 0.01, 0.99);
+
+    return length(PointVec - SegmentVec * t);
+}
+
+/**
+ * 计算2D点到AABB包围盒的距离
+ * @param InPoint 输入点坐标
+ * @param InMinExtent 包围盒最小点
+ * @param InMaxExtent 包围盒最大点
+ * @return 点到包围盒的最短距离（在内部为0）
+ */
+float PointToAABBDistance2D(float2 InPoint, float2 InMinExtent, float2 InMaxExtent)
+{
+    float2 ClosestPoint = clamp(InPoint, InMinExtent, InMaxExtent);
+    float2 Delta = InPoint - ClosestPoint;
+    
+    return sqrt(dot(Delta, Delta));
+}
+
+/**
+ * 检查BVH节点是否有效
+ */
+bool IsValidNode(FGPULineBVHNode InNode)
+{
+    // 有效节点条件：有子节点
+    return (InNode.LeftChild != INVALID_NODE_INDEX 
+            || InNode.RightChild != INVALID_NODE_INDEX
+            || InNode.IsLeaf);
+}
+
+/**
+ * BVH树查询函数 - 查找距离点最近的线段
+ * @param WorldPosition 世界空间位置
+ * @param LineWidth 线宽
+ * @param OutTextureUV 输出的纹理坐标
+ * @param OutPolygonIndex 输出的多边形索引
+ * @return 到最近线段的距离
+ */
+float QueryBVH(float3 WorldPosition, 
+    float LineWidth, 
+    out float2 OutTextureUV, 
+    out uint OutPolygonIndex)
+{
+    float ClosestDistance = MAX_DISTANCE;
+    float2 WorldPosition2D = WorldPosition.xy;
+    
+    // 使用栈代替递归
+    int Stack[64];
+    int StackPtr = 0;
+    Stack[StackPtr++] = 0; // 从根节点开始
+    
+    int LoopCounter = 0;
+    
+    [loop]
+    while (StackPtr > 0)
+    {
+        LoopCounter++;
+        
+        if (LoopCounter > MAX_LOOPS)
+        {
+            ClosestDistance = INVALID_DISTANCE;
+            break;
+        }
+        
+        // 弹出当前节点
+        int CurrentNodeIndex = Stack[--StackPtr];
+        FGPULineBVHNode CurrentNode = LineBVHNodeData[CurrentNodeIndex];
+        
+        // 节点有效性检查
+        if (!IsValidNode(CurrentNode))
+        {
+            continue;
+        }
+
+        // 计算WorldPosition2D到当前节点包围盒的最短距离（在包围盒内部时DistanceToBox为0）
+        float DistanceToBox = PointToAABBDistance2D(WorldPosition2D, CurrentNode.MinExtent.xy, CurrentNode.MaxExtent.xy);
+        
+        // 快速剪枝
+        if (DistanceToBox > LineWidth * 0.5f)
+        {
+            continue;
+        }
+        
+        if (CurrentNode.IsLeaf == 1)
+        {
+            // 叶子节点：处理簇中的线段
+            FGPUSegmentCluster Cluster = SegmentClusterData[CurrentNode.ClusterIndex];
+            
+            // TODO: 支持多LOD
+            // 处理LOD0的线段 
+            uint CurrentLOD = 0;
+            for (uint i = 0; i < Cluster.SegmentNumPerLOD[CurrentLOD]; i++)
+            {
+                uint SegmentIndex = Cluster.SegmentStartIndex + i;
+                for (int j = 0; j < CurrentLOD; j++)
+                {
+                    SegmentIndex += Cluster.SegmentNumPerLOD[j];
+                }
+                
+                FGPUSegment Segment = SegmentData[SegmentIndex];
+
+                float TextureY;
+                bool IsLeft;
+                float SegmentDistance = PointToSegmentDistance2D(WorldPosition2D, Segment.Start.xy, Segment.End.xy, TextureY, IsLeft);
+                ClosestDistance = min(ClosestDistance, SegmentDistance);
+                
+                if (ClosestDistance <= LineWidth * 0.5f)
+                {
+                    // 计算纹理坐标
+                    OutTextureUV.x = IsLeft ? (0.5 - SegmentDistance / LineWidth) : (0.5 + SegmentDistance / LineWidth);
+                    OutTextureUV.y = TextureY;
+                    
+                    OutPolygonIndex = Segment.PolygonIndex;
+                    
+                    return ClosestDistance;
+                }
+            }
+        }
+        else
+        {
+            // 内部节点：根据距离优化处理顺序
+            if (CurrentNode.LeftChild != INVALID_NODE_INDEX)
+            {
+                FGPULineBVHNode LeftChild = LineBVHNodeData[CurrentNode.LeftChild];
+                
+                if (PointToAABBDistance2D(WorldPosition2D, LeftChild.MinExtent.xy, LeftChild.MaxExtent.xy) < LineWidth * 0.5f)
+                {
+                    Stack[StackPtr++] = CurrentNode.LeftChild;
+                }
+            }
+            
+            if (CurrentNode.RightChild != INVALID_NODE_INDEX)
+            {
+                FGPULineBVHNode RightChild = LineBVHNodeData[CurrentNode.RightChild];
+                
+                if (PointToAABBDistance2D(WorldPosition2D, RightChild.MinExtent.xy, RightChild.MaxExtent.xy) < LineWidth * 0.5f)
+                {
+                    Stack[StackPtr++] = CurrentNode.RightChild;
+                }
+            }
+        }
+    }
+    return ClosestDistance;
+}
+
+/**
+ * 计算像素在世界空间中的大小（考虑了透视矫正，用于精确渲染）
+ * @param WorldPosition 世界空间位置
+ * @param InvViewMatrix 视图逆矩阵
+ * @param ScreenUV 屏幕UV坐标
+ * @param ViewportRect 视口矩形
+ * @return 像素在世界空间中的大小
+ */
+float CalculatePixelWorldSize(float3 WorldPosition, float4x4 InvViewMatrix, float2 ScreenUV, int4 ViewportRect)
+{
+    // 定义相机
+    //TODO: 处理硬编码
+    float CameraFOV = 1.5708; // 90度
+    int ViewportHeight = ViewportRect.w;
+    int ViewportWidth = ViewportRect.z;
+    
+    float3 CameraPosition = InvViewMatrix[3].xyz;
+    
+    // 计算距离
+    float DistanceToCamera = length(WorldPosition - CameraPosition);
+    if (DistanceToCamera > MAX_DISTANCE)
+    {
+        return 0;
+    }
+
+     // 计算垂直方向的像素大小
+    float VerticalPixelSize = (2.0 * DistanceToCamera * tan(CameraFOV * 0.5)) / ViewportHeight;
+    
+     // 计算水平方向的像素大小
+    float AspectRatio = (float)ViewportWidth / ViewportHeight;
+    float HorizontalPixelSize = VerticalPixelSize * AspectRatio;
+    
+    // 计算当前像素偏移，转换为[-1, 1]范围
+    float2 ScreenOffset = (ScreenUV - 0.5) * 2.0;
+   
+    // 计算透视矫正
+    float CosTheta = sqrt(ScreenOffset.x * ScreenOffset.x * AspectRatio * AspectRatio + ScreenOffset.y * ScreenOffset.y + AspectRatio);
+    float PerspectiveCorrection = 1.0 / CosTheta;
+    
+    // 返回平均像素大小
+    float PixelWorldSize = 0.5 * (HorizontalPixelSize + VerticalPixelSize) * PerspectiveCorrection;
+    
+    return PixelWorldSize;
+}
+
+////////////////////////////////////////////////////////////
+// 像素着色器
+////////////////////////////////////////////////////////////
+void MainPixelShader(in float4 SvPosition : SV_Position, out float4 OutColor : SV_Target0)
+{
+    // 采样纹理
+    float SceneDepth = DepthTexture.Load(uint3(SvPosition.xy, 0)).r;
+    float4 SceneColor = ColorTexture.Load(uint3(SvPosition.xy, 0));
+    uint2 CustomDepth = CustomDepthTexture.Load(uint3(SvPosition.xy, 0));
+    uint StencilValue = CustomDepth.g & 0xFF; // 提取低8位
+    
+    // 将屏幕坐标转换为NDC坐标
+    float2 NormalizedScreenPosition = float2(SvPosition.x / ViewportRect.z, SvPosition.y / ViewportRect.w);
+    float4 NDCPosition = float4(NormalizedScreenPosition.x * 2.0 - 1.0, (1.0 - NormalizedScreenPosition.y) * 2.0 - 1.0, SceneDepth, 1.0);
+
+    // 转换到世界空间
+    float4 WorldPosition = mul(NDCPosition, ScreenToWorld);
+    WorldPosition.xyz /= WorldPosition.w;
+    
+    // 计算像素的世界大小
+    float PixelWorldSize = CalculatePixelWorldSize(WorldPosition.xyz, InvViewMatrix, NormalizedScreenPosition, ViewportRect);
+    
+    // LineWidth转换为像素单位
+    float LineWidthInPixels = LineWidth * PixelWorldSize;
+    
+    float FinalLineWidth = LineWidth;
+    if(bUsePixelUnit)
+    {
+        FinalLineWidth = LineWidthInPixels;
+    }
+    
+    // BVH查询获取线段信息
+    float2 LineTexCoord;
+    uint PolygonIndex = -1;
+    float DistanceToPolygons = QueryBVH(WorldPosition.xyz, FinalLineWidth, LineTexCoord, PolygonIndex);
+    
+    //if (StencilValue == 88 && abs(CustomDepthValue - SceneDepth) < 0.00001)
+    if (StencilValue == 88)
+    {
+        // 模板区域直接输出指定颜色(占位)
+        // TODO: 传递模板深度，再进行逻辑判断
+        OutColor = float4(0, 0.6, 0.298, 0);
+    }
+    else
+    {
+         // 在多边形线段内
+        if (DistanceToPolygons < FinalLineWidth * 0.5f)
+        {
+            // 混合线条颜色
+            float4 FinalLineColor = bUseCustomTexture ? CustomTexture.Sample(CustomTextureSampler, LineTexCoord) : LineColor;
+            OutColor = lerp(SceneColor, FinalLineColor, LineOpacity);
+        }
+        // 查询错误输出黑色
+        else if (DistanceToPolygons == INVALID_DISTANCE)
+        {
+            OutColor = float4(0, 0, 0, 1);
+        }
+        else
+        {
+            // 不在线段范围内返回场景颜色
+            OutColor = SceneColor;
+        }
+    }
+}

@@ -1,0 +1,243 @@
+#include "/Engine/Public/Platform.ush"
+
+
+// =====================================================
+// BVH查询相关的常量定义
+// =====================================================
+static const uint MAX_STACK_NUM = 64;       // 栈容量
+static const float INVALID_STACK_FLAG = -3; // 栈溢出时的返回标记
+static const int INVALID_NODE_INDEX = -1;   // 无效节点索引标识
+static const int MAX_LOOPS = 256;           // 查询时最大循环次数
+
+// =====================================================
+// 数据结构定义
+// =====================================================
+/**
+ * BVH节点
+ */
+struct FGPUPolygonBVHNode
+{
+    float3 MinExtent; ///< 包围盒最小值						(12字节)
+    int LeftChild; ///< 左子节点索引（-1表示无效）			(4字节)
+
+    float3 MaxExtent; ///< 包围盒最大值						(12字节)
+    int RightChild; ///< 右子节点索引（-1表示无效）			(4字节)
+
+    int TriangleIndex; ///< 三角形起始索引（仅叶子节点有效）	(4字节)
+    float IsLeaf; ///< 是否为叶子节点						(4字节)
+    float Padding1; ///< 填充1								(4字节)
+    float Padding2; ///< 填充2								(4字节)
+}; 
+
+/**
+ * 三角形
+ */
+struct FGPUTriangle
+{
+    float3 Vertex1;     ///< 顶点1			    (12字节)
+    float Padding1;     ///< 填充1			    (4字节)
+
+    float3 Vertex2;     ///< 顶点2			    (12字节)
+    float Padding2;     ///< 填充2			    (4字节)
+
+    float3 Vertex3;     ///< 顶点3			    (12字节)
+    int PolygonIndex;   ///< 所属多边形索引	    (4字节)
+};
+
+// =====================================================
+// 纹理
+// =====================================================
+Texture2D DepthTexture; ///< 场景深度纹理
+Texture2D ColorTexture; ///< 场景颜色纹理
+
+// =====================================================
+// 常量缓冲区
+// =====================================================
+float4x4 ScreenToWorld; ///< 屏幕坐标到世界坐标变换矩阵
+float4x4 InvViewMatrix; ///< 视图逆矩阵
+int4 ViewportRect;      ///< 视口矩形信息(x,y,width,height)
+float Opacity;          ///< 面不透明度
+float4 Color;           ///< 面颜色
+
+// =====================================================
+// 结构化缓冲区
+// =====================================================
+StructuredBuffer<FGPUTriangle> TriangleData;                ///< 三角形数据
+StructuredBuffer<FGPUPolygonBVHNode> PolygonBVHNodeData;    ///< BVH节点数据
+
+
+////////////////////////////////////////////////////////////
+// 工具函数实现
+////////////////////////////////////////////////////////////
+/**
+ * 简单的伪随机数生成器，基于多边形索引生成随机颜色
+ */
+float3 GenerateRandomColor(int PolygonIndex)
+{
+    // 使用不同的种子值生成不同的颜色
+    float r = frac(sin(dot(float2(PolygonIndex, 127.1), float2(12.9898, 78.233))) * 43758.5453);
+    float g = frac(sin(dot(float2(PolygonIndex, 311.7), float2(12.9898, 78.233))) * 43758.5453);
+    float b = frac(sin(dot(float2(PolygonIndex, 419.2), float2(12.9898, 78.233))) * 43758.5453);
+    
+    return float3(r, g, b);
+}
+
+/**
+ * 计算2D点是否在AABB内
+ */
+bool IsPointInAABB2D(float2 InPoint, float2 MinExtent, float2 MaxExtent)
+{
+    float2 comp1 = step(MinExtent, InPoint); // P >= MinExtent ? 1 : 0
+    float2 comp2 = step(InPoint, MaxExtent); // P <= MaxExtent ? 1 : 0
+    float2 result = comp1 * comp2;
+    
+    return (result.x * result.y) > 0.5;
+}
+
+/**
+ * 判断点是否在三角形内
+ */
+bool IsPointInsideTriangle2D(float2 P, float2 A, float2 B, float2 C)
+{
+    // 计算重心坐标
+    float2 v0 = B - A;
+    float2 v1 = C - A;
+    float2 v2 = P - A;
+
+    float dot00 = dot(v0, v0);
+    float dot01 = dot(v0, v1);
+    float dot02 = dot(v0, v2);
+    float dot11 = dot(v1, v1);
+    float dot12 = dot(v1, v2);
+
+    // 计算重心坐标
+    float invDenom = 1.0 / (dot00 * dot11 - dot01 * dot01);
+    float u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+    float v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+
+    // 检查点是否在三角形内
+    return (u >= 0) && (v >= 0) && (u + v <= 1);
+}
+
+/**
+ * 检查BVH节点是否有效
+ */
+bool IsValidNode(FGPUPolygonBVHNode InNode)
+{
+    // 有效节点条件：有子节点
+    return (InNode.LeftChild != INVALID_NODE_INDEX 
+            || InNode.RightChild != INVALID_NODE_INDEX 
+            || InNode.IsLeaf );
+}
+
+/**
+ * BVH查询函数 - 在BVH树中查找最近面
+ */
+float QueryBVH(float3 WorldPosition, out float OutPolygonIndex)
+{
+    // 使用栈代替递归
+    int Stack[MAX_STACK_NUM];
+    uint StackPtr = 0;
+    Stack[StackPtr++] = 0; // 从根节点开始
+    
+    int LoopCounter = 0;
+    
+    // 计算世界位置的XY平面
+    float2 WorldPos2D = WorldPosition.xy;
+    
+    while (StackPtr > 0)
+    {
+        LoopCounter++;
+        // 栈溢出或者循环超出阈值
+        if (StackPtr > MAX_STACK_NUM || LoopCounter > MAX_LOOPS)
+        {
+            return INVALID_STACK_FLAG;
+        }
+        
+        // 弹出当前节点
+        uint CurrentNodeIndex = Stack[--StackPtr];
+        FGPUPolygonBVHNode CurrentNode = PolygonBVHNodeData[CurrentNodeIndex];
+        
+        if (!IsValidNode(CurrentNode))
+        {
+            continue;
+        }
+        
+        if (!IsPointInAABB2D(WorldPos2D, CurrentNode.MinExtent.xy, CurrentNode.MaxExtent.xy))
+        {
+            continue;
+        }
+        
+        if (CurrentNode.IsLeaf)
+        {
+            // 叶子节点：
+            // 获取三角形数据
+            FGPUTriangle Triangle = TriangleData[CurrentNode.TriangleIndex];
+            
+            // 判断点是否在三角形内
+            if (IsPointInsideTriangle2D(WorldPos2D, Triangle.Vertex1.xy, Triangle.Vertex2.xy, Triangle.Vertex3.xy))
+            {
+                // 找到包含点的三角形，返回负值表示在内部
+                OutPolygonIndex = Triangle.PolygonIndex;
+                
+                return -1.0f;
+            }
+        }
+        else
+        {
+            // 内部节点：
+            if (CurrentNode.LeftChild != INVALID_NODE_INDEX)
+            {
+                Stack[StackPtr++] = CurrentNode.LeftChild;
+            }
+            if (CurrentNode.RightChild != INVALID_NODE_INDEX)
+            {
+                Stack[StackPtr++] = CurrentNode.RightChild;
+            }
+        }
+    }
+    
+    // 没有找到包含点的三角形，返回正值表示在外部
+    OutPolygonIndex = -1.0f;
+    return 1.0f;
+}
+
+////////////////////////////////////////////////////////////
+// 像素着色器
+////////////////////////////////////////////////////////////
+void MainPixelShader(in float4 SvPosition : SV_Position, out float4 OutColor : SV_Target0)
+{
+    // 采样深度和颜色纹理
+    float SceneDepth = DepthTexture.Load(uint3(SvPosition.xy, 0)).r;
+    float4 SceneColor = ColorTexture.Load(uint3(SvPosition.xy, 0));
+    
+    // 将屏幕坐标转换为NDC坐标
+    float2 NormalizedScreenPosition = float2(SvPosition.x / ViewportRect.z, SvPosition.y / ViewportRect.w);
+    float4 NDCPosition = float4(NormalizedScreenPosition.x * 2.0 - 1.0, (1.0 - NormalizedScreenPosition.y) * 2.0 - 1.0, SceneDepth, 1.0);
+
+    // 转换到世界空间
+    float4 WorldPosition = mul(NDCPosition, ScreenToWorld);
+    WorldPosition.xyz /= WorldPosition.w;
+    
+    float PolygonIndex;
+    // BVH查询获取多边形面距离
+    float Distance = QueryBVH(WorldPosition.xyz, PolygonIndex);
+    
+    // 栈溢出或者查询循环超过阈值时渲染黑色
+    if (Distance == INVALID_STACK_FLAG)
+    {
+        OutColor = float4(0, 0, 0, 0);
+    }
+    // 如果点在多边形内（负距离），则填充颜色
+    else if (Distance < 0)
+    {
+        // 混合颜色
+        float3 RandomColor = GenerateRandomColor(PolygonIndex);
+        OutColor = lerp(SceneColor, Color, Opacity);
+    }
+    else
+    {
+        OutColor = SceneColor;
+
+    }
+}
