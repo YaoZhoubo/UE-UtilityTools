@@ -8,7 +8,7 @@
 
 /**
  * @brief SurfacePolygon场景代理
- * 
+ *
  * 作为USurfacePolygonComponent的渲染代理，保存其渲染相关的参数
  */
 class FSurfacePolygonSceneProxy
@@ -134,5 +134,5 @@ private:
 	TMap<uint32, TSharedPtr<FSurfacePolygonSceneProxy>> SceneProxyMap;
 	uint32 NextProxyId = 0; ///< 可以反映已经注册过的代理总数（包括已经注销的）
 
-	FCriticalSection RenderThreadLock;
+	FRWLock SceneProxyMapLock;
 };

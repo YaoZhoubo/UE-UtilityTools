@@ -17,16 +17,16 @@
 
 #include "../Private/SceneRendering.h"
 
-	
+
 class FSurfaceLineRenderPS : public FGlobalShader
 {
 public:
 	// 声明全局着色器
 	DECLARE_GLOBAL_SHADER(FSurfaceLineRenderPS);
-	
+
 	// 告诉引擎此着色器使用结构作为其参数
 	SHADER_USE_PARAMETER_STRUCT(FSurfaceLineRenderPS, FGlobalShader);
-	
+
 	// 着色器参数结构声明
 	// 参数与HLSL代码中的参数匹配
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
@@ -48,7 +48,7 @@ public:
 		SHADER_PARAMETER(uint32, bUsePixelUnit)														// 是否使用像素单位
 		RENDER_TARGET_BINDING_SLOTS()																// 渲染目标绑定槽
 	END_SHADER_PARAMETER_STRUCT()
-	
+
 public:
 	// 由引擎调用，以确定为此着色器编译哪些变体
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -56,19 +56,19 @@ public:
 		return true;
 	}
 };
-	
+
 // 实现全局着色器		着色器类				着色器文件位置							着色器入口函数名	着色器类型
 IMPLEMENT_GLOBAL_SHADER(FSurfaceLineRenderPS, "/UtilityTools/SurfaceLineRenderShader.usf", "MainPixelShader", SF_Pixel);
-	
+
 // 着色器管理器实例初始化
 FSurfaceLineRenderManager* FSurfaceLineRenderManager::Instance = nullptr;
-	
+
 FSurfaceLineRenderManager::~FSurfaceLineRenderManager()
 {
 	// 确保渲染结束
 	EndRendering();
 
-	FScopeLock Lock(&RenderThreadLock);
+	FRWScopeLock Lock(SceneProxyMapLock, SLT_ReadOnly);
 	for (auto& ProxyPair : SceneProxyMap)
 	{
 		if (ProxyPair.Value.IsValid())
@@ -83,16 +83,16 @@ FSurfaceLineRenderManager::~FSurfaceLineRenderManager()
 	}
 	SceneProxyMap.Empty();
 }
-	
+
 void FSurfaceLineRenderManager::RegisterSceneProxy(const TSharedPtr<FSurfaceLineSceneProxy>& InSceneProxy)
 {
 	if (InSceneProxy.IsValid())
 	{
-		FScopeLock Lock(&RenderThreadLock);
-
 		// 分配唯一ID
 		uint32 NewProxyId = NextProxyId++;
 		InSceneProxy->ProxyId = NewProxyId;
+
+		FRWScopeLock Lock(SceneProxyMapLock, SLT_Write);
 
 		// 检查是否是第一个代理
 		bool bWasEmpty = SceneProxyMap.IsEmpty();
@@ -106,23 +106,17 @@ void FSurfaceLineRenderManager::RegisterSceneProxy(const TSharedPtr<FSurfaceLine
 		}
 	}
 }
-	
+
 void FSurfaceLineRenderManager::UnregisterSceneProxy(uint32 ProxyId)
 {
 	TSharedPtr<FSurfaceLineSceneProxy> SceneProxyToRemove;
 	bool bMapIsEmpty = false;
 
 	{
-		FScopeLock Lock(&RenderThreadLock);
+		FRWScopeLock Lock(SceneProxyMapLock, SLT_Write);
 
-		if (SceneProxyMap.RemoveAndCopyValue(ProxyId, SceneProxyToRemove))
-		{
-			bMapIsEmpty = SceneProxyMap.IsEmpty();
-		}
-		else
-		{
-			bMapIsEmpty = SceneProxyMap.IsEmpty();
-		}
+		SceneProxyMap.RemoveAndCopyValue(ProxyId, SceneProxyToRemove);
+		bMapIsEmpty = SceneProxyMap.IsEmpty();
 	}
 
 	if (SceneProxyToRemove.IsValid())
@@ -144,11 +138,10 @@ void FSurfaceLineRenderManager::UnregisterSceneProxy(uint32 ProxyId)
 
 int32 FSurfaceLineRenderManager::GetNumSceneProxies()
 {
-	FScopeLock Lock(&RenderThreadLock);
-	
+	FRWScopeLock Lock(SceneProxyMapLock, SLT_ReadOnly);
 	return SceneProxyMap.Num();
 }
-	
+
 void FSurfaceLineRenderManager::BeginRendering()
 {
 	// 如果已经注册回调，直接返回
@@ -189,7 +182,7 @@ void FSurfaceLineRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters
 {
 	// 检查是否在渲染线程
 	check(IsInRenderingThread());
-	
+
 	// 仅在Game和PIE中渲染
 	const FSceneView* SceneView = static_cast<const FSceneView*>(Parameters.View);
 	const FSceneInterface* Scene = SceneView->Family->Scene;
@@ -201,21 +194,30 @@ void FSurfaceLineRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters
 		}
 	}
 
-	// 复制SceneProxyMap为本地Proxies
-	FScopeLock Lock(&RenderThreadLock);
-	if (SceneProxyMap.IsEmpty())
-	{
-		return;
-	}
 	TArray<TSharedPtr<FSurfaceLineSceneProxy>> ProxiesToRender;
-	for (auto& ProxyPair : SceneProxyMap)
 	{
-		if (ProxyPair.Value.IsValid())
+		FRWScopeLock Lock(SceneProxyMapLock, SLT_ReadOnly);
+
+		// 复制SceneProxyMap为本地Proxies
+		if (SceneProxyMap.IsEmpty())
 		{
-			ProxiesToRender.Add(ProxyPair.Value);
+			return;
+		}
+		for (auto& ProxyPair : SceneProxyMap)
+		{
+			if (ProxyPair.Value.IsValid())
+			{
+				ProxiesToRender.Add(ProxyPair.Value);
+			}
 		}
 	}
-	Lock.Unlock();
+
+	// 按照ProxyId进行排序（从小到大，即注册顺序，以保证按注册顺序渲染）
+	ProxiesToRender.Sort(
+		[](const TSharedPtr<FSurfaceLineSceneProxy>& A, const TSharedPtr<FSurfaceLineSceneProxy>& B)
+		{
+			return A->GetProxyId() < B->GetProxyId();
+		});
 
 	// 为每个场景代理创建渲染Pass
 	for (TSharedPtr<FSurfaceLineSceneProxy> LocalSceneProxy : ProxiesToRender)
@@ -226,6 +228,14 @@ void FSurfaceLineRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters
 		}
 
 		FRDGBuilder& GraphBuilder = *Parameters.GraphBuilder;
+
+		// 重新初始化判断
+		if (!LocalSceneProxy->BVHNodesPooledBuffer.IsValid()
+			|| !LocalSceneProxy->ClustersPooledBuffer.IsValid()
+			|| !LocalSceneProxy->SegmentsPooledBuffer.IsValid())
+		{
+			LocalSceneProxy->bBuffersInitialized = false;
+		}
 
 		// 初始化池化缓冲区
 		LocalSceneProxy->InitializePooledBuffers(GraphBuilder);
@@ -345,7 +355,7 @@ void FSurfaceLineRenderManager::Execute_RenderThread(FPostOpaqueRenderParameters
 			TStaticBlendState<>::GetRHI(),
 			TStaticRasterizerState<>::GetRHI(),
 			TStaticDepthStencilState<>::GetRHI()
-			);
+		);
 	}
 }
 
@@ -359,7 +369,7 @@ void FSurfaceLineSceneProxy::InitializePooledBuffers(FRDGBuilder& GraphBuilder)
 	FRDGBufferDesc BVHNodesDesc = FRDGBufferDesc::CreateStructuredDesc(
 		sizeof(FGPULineBVHNode), GPULineData->Nodes.Num());
 	FRDGBuffer* BVHNodesBuffer = GraphBuilder.CreateBuffer(
-		BVHNodesDesc, TEXT("BVHNodesPooledBuffer"), 
+		BVHNodesDesc, TEXT("BVHNodesPooledBuffer"),
 		ERDGBufferFlags::MultiFrame);
 	GraphBuilder.QueueBufferUpload(
 		BVHNodesBuffer, GPULineData->Nodes.GetData(),

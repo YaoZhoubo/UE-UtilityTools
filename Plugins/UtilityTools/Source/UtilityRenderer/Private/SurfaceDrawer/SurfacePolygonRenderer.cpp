@@ -58,13 +58,28 @@ FSurfacePolygonRenderManager::~FSurfacePolygonRenderManager()
 {
 	// 确保渲染结束
 	EndRendering();
+
+	FRWScopeLock Lock(SceneProxyMapLock, SLT_ReadOnly);
+	for (auto& ProxyPair : SceneProxyMap)
+	{
+		if (ProxyPair.Value.IsValid())
+		{
+			// 发送渲染命令释放GPU资源
+			ENQUEUE_RENDER_COMMAND(ReleaseSurfacePolygonResources)(
+				[SceneProxyCopy = ProxyPair.Value](FRHICommandList& RHICmdList)
+				{
+					SceneProxyCopy->ReleasePooledBuffers();
+				});
+		}
+	}
+	SceneProxyMap.Empty();
 }
 
 void FSurfacePolygonRenderManager::RegisterSceneProxy(const TSharedPtr<FSurfacePolygonSceneProxy>& InSceneProxy)
 {
 	if (InSceneProxy.IsValid())
 	{
-		FScopeLock Lock(&RenderThreadLock);
+		FRWScopeLock Lock(SceneProxyMapLock, SLT_Write);
 
 		// 分配唯一ID
 		uint32 NewProxyId = NextProxyId++;
@@ -89,16 +104,10 @@ void FSurfacePolygonRenderManager::UnregisterSceneProxy(uint32 ProxyId)
 	bool bMapIsEmpty = false;
 
 	{
-		FScopeLock Lock(&RenderThreadLock);
+		FRWScopeLock Lock(SceneProxyMapLock, SLT_Write);
 
-		if (SceneProxyMap.RemoveAndCopyValue(ProxyId, SceneProxyToRemove))
-		{
-			bMapIsEmpty = SceneProxyMap.IsEmpty();
-		}
-		else
-		{
-			bMapIsEmpty = SceneProxyMap.IsEmpty();
-		}
+		SceneProxyMap.RemoveAndCopyValue(ProxyId, SceneProxyToRemove);
+		bMapIsEmpty = SceneProxyMap.IsEmpty();
 	}
 
 	if (SceneProxyToRemove.IsValid())
@@ -120,7 +129,7 @@ void FSurfacePolygonRenderManager::UnregisterSceneProxy(uint32 ProxyId)
 
 int32 FSurfacePolygonRenderManager::GetNumSceneProxies()
 {
-	FScopeLock Lock(&RenderThreadLock);
+	FRWScopeLock Lock(SceneProxyMapLock, SLT_ReadOnly);
 
 	return SceneProxyMap.Num();
 }
@@ -178,30 +187,40 @@ void FSurfacePolygonRenderManager::Execute_RenderThread(FPostOpaqueRenderParamet
 	}
 
 	// 复制SceneProxyMap为本地Proxies
-	FScopeLock Lock(&RenderThreadLock);
-	if (SceneProxyMap.IsEmpty())
-	{
-		return;
-	}
 	TArray<TSharedPtr<FSurfacePolygonSceneProxy>> ProxiesToRender;
-	for (auto& ProxyPair : SceneProxyMap)
 	{
-		if (ProxyPair.Value.IsValid())
+		FRWScopeLock Lock(SceneProxyMapLock, SLT_ReadOnly);
+
+		// 复制SceneProxyMap为本地Proxies
+		if (SceneProxyMap.IsEmpty())
 		{
-			ProxiesToRender.Add(ProxyPair.Value);
+			return;
+		}
+		for (auto& ProxyPair : SceneProxyMap)
+		{
+			if (ProxyPair.Value.IsValid())
+			{
+				ProxiesToRender.Add(ProxyPair.Value);
+			}
 		}
 	}
-	Lock.Unlock();
 
 	// 为每个场景代理创建渲染Pass
 	for (TSharedPtr<FSurfacePolygonSceneProxy> LocalSceneProxy : ProxiesToRender)
-	{ 
+	{
 		if (!LocalSceneProxy.IsValid() || !LocalSceneProxy->GPUPolygonData.IsValid() || !LocalSceneProxy->GPUPolygonData->IsValid())
 		{
 			continue;
 		}
 
 		FRDGBuilder& GraphBuilder = *Parameters.GraphBuilder;
+
+		// 重新初始化判断
+		if (!LocalSceneProxy->BVHNodesPooledBuffer.IsValid()
+			|| !LocalSceneProxy->TrianglesPooledBuffer.IsValid())
+		{
+			LocalSceneProxy->bBuffersInitialized = false;
+		}
 
 		// 初始化持久化缓冲区
 		LocalSceneProxy->InitializePooledBuffers(GraphBuilder);
@@ -260,7 +279,7 @@ void FSurfacePolygonRenderManager::Execute_RenderThread(FPostOpaqueRenderParamet
 			TStaticBlendState<>::GetRHI(),
 			TStaticRasterizerState<>::GetRHI(),
 			TStaticDepthStencilState<>::GetRHI()
-			);
+		);
 	}
 }
 
