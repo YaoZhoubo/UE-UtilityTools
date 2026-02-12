@@ -17,16 +17,16 @@ static const int MAX_LOOPS = 256;           // 查询时最大循环次数
  */
 struct FGPUPolygonBVHNode
 {
-    float3 MinExtent; ///< 包围盒最小值						(12字节)
-    int LeftChild; ///< 左子节点索引（-1表示无效）			(4字节)
+    float3 MinExtent;   ///< 包围盒最小值						(12字节)
+    int LeftChild;      ///< 左子节点索引（-1表示无效）		    (4字节)
 
-    float3 MaxExtent; ///< 包围盒最大值						(12字节)
-    int RightChild; ///< 右子节点索引（-1表示无效）			(4字节)
+    float3 MaxExtent;   ///< 包围盒最大值						(12字节)
+    int RightChild;     ///< 右子节点索引（-1表示无效）			(4字节)
 
-    int TriangleIndex; ///< 三角形起始索引（仅叶子节点有效）	(4字节)
-    float IsLeaf; ///< 是否为叶子节点						(4字节)
-    float Padding1; ///< 填充1								(4字节)
-    float Padding2; ///< 填充2								(4字节)
+    int TriangleIndex;  ///< 三角形起始索引（仅叶子节点有效）	(4字节)
+    int IsLeaf;         ///< 是否为叶子节点						(4字节)
+    float Padding1;     ///< 填充1								(4字节)
+    float Padding2;     ///< 填充2								(4字节)
 }; 
 
 /**
@@ -64,7 +64,6 @@ float4 Color;           ///< 面颜色
 // =====================================================
 StructuredBuffer<FGPUTriangle> TriangleData;                ///< 三角形数据
 StructuredBuffer<FGPUPolygonBVHNode> PolygonBVHNodeData;    ///< BVH节点数据
-
 
 ////////////////////////////////////////////////////////////
 // 工具函数实现
