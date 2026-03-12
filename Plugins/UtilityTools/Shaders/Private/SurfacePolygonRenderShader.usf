@@ -82,6 +82,28 @@ float3 GenerateRandomColor(int PolygonIndex)
 }
 
 /**
+ * 计算三点之间的角度（B是顶点）
+ */
+float ComputeAngle(float2 A, float2 B, float2 C)
+{
+    float2 ba = A - B;
+    float2 bc = C - B;
+    
+    float len_ba = length(ba);
+    float len_bc = length(bc);
+    
+    if (len_ba < 1e-6 || len_bc < 1e-6)
+        return 0.0; // 有顶点重合
+    
+    float cos_angle = dot(ba, bc) / (len_ba * len_bc);
+    
+    // 处理数值误差
+    cos_angle = clamp(cos_angle, -1.0, 1.0);
+    
+    return acos(cos_angle);
+}
+
+/**
  * 计算2D点是否在AABB内
  */
 bool IsPointInAABB2D(float2 InPoint, float2 MinExtent, float2 MaxExtent)
@@ -98,6 +120,40 @@ bool IsPointInAABB2D(float2 InPoint, float2 MinExtent, float2 MaxExtent)
  */
 bool IsPointInsideTriangle2D(float2 P, float2 A, float2 B, float2 C)
 {
+    const float EPSILON = 1e-6; // 误差
+    const float EPSILON_SQ = 1e-12; // 平方误差
+    
+    // 检查三角形顶点重合
+    if (dot(A - B, A - B) < EPSILON_SQ ||
+        dot(B - C, B - C) < EPSILON_SQ ||
+        dot(C - A, C - A) < EPSILON_SQ)
+    {
+        // 顶点重合，视为退化
+        return false;
+    }
+    
+    // 检查三角形面积
+    float area = 0.5 * (B.x - A.x) * (C.y - A.y) - (B.y - A.y) * (C.x - A.x);
+    if (abs(area) < EPSILON)
+    {
+        // 面积太小，视为退化
+        return false;
+    }
+    
+    // 检查三角形角度
+    // 计算三个内角
+    float angleA = ComputeAngle(B, A, C);
+    float angleB = ComputeAngle(A, B, C);
+    float angleC = ComputeAngle(B, C, A);
+    
+    const float MIN_ANGLE = 1e-4;
+    
+    if (angleA < MIN_ANGLE || angleB < MIN_ANGLE || angleC < MIN_ANGLE)
+    {
+        // 存在过小角度，视为退化
+        return false;
+    }
+    
     // 计算重心坐标
     float2 v0 = B - A;
     float2 v1 = C - A;
